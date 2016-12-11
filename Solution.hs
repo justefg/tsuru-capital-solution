@@ -9,7 +9,7 @@ import Control.Applicative
 import Control.Monad hiding (join)
 import Control.Arrow (second)
 import qualified Data.ByteString as B
-import Data.ByteString.Char8 (singleton)
+import qualified Data.ByteString.Char8 as BC
 import qualified Data.Attoparsec.ByteString as A
 import Data.Attoparsec.Combinator (count)
 import Data.Int (Int64)
@@ -17,7 +17,7 @@ import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.List (find)
 
-import Data.Binary.Get
+import qualified Data.Set as S
 
 data Offer = Offer B.ByteString B.ByteString deriving (Show, Eq, Ord)
 
@@ -38,7 +38,7 @@ parseOffer = Offer <$> price <*> qty
           dropZeroes s = let res = B.dropWhile (== 48) s in if B.null res then "0" else res
 
 toRow :: QuotePacket -> B.ByteString
-toRow Packet {..} = B.intercalate (singleton ' ') $ [time, issueCode] ++ bidStrs ++ askStrs
+toRow Packet {..} = B.intercalate (BC.singleton ' ') $ [time, issueCode] ++ bidStrs ++ askStrs
     where bidStrs = map offerStr $ reverse bids
           askStrs = map offerStr asks
           offerStr (Offer p q) = B.concat [q, "@", p]
@@ -73,13 +73,29 @@ outputUnordered handle = do
     case newQuote of
         Just (newQuote, pktTime) -> do
             putStr $ show pktTime ++ " "
-            B.putStrLn $ toRow newQuote
+            BC.putStrLn $ toRow newQuote
             outputUnordered handle
         Nothing -> return ()
 
+outputOrdered :: PcapHandle -> Int64 -> S.Set QuotePacket -> IO ()
+outputOrdered handle prevPktTime pendingQuotes = do
+    newQuote <- getQuotePacket handle
+    case newQuote of
+        Just (newQuote, pktTime) -> do
+            if pktTime - prevPktTime >= 3000000
+                then do
+                    mapM_ (BC.putStrLn . toRow) $ S.toAscList pendingQuotes
+                    outputOrdered handle pktTime S.empty
+                else
+                    outputOrdered handle pktTime (S.insert newQuote pendingQuotes)
+        Nothing ->
+            mapM_ (BC.putStrLn . toRow) $ S.toAscList pendingQuotes
 
 main = do
     args <- getArgs
     let path = fromMaybe (error "Provide the path of a dump-file") $ find (/= "-r") args
     handle <- openOffline path
-    outputUnordered handle
+    result <- getQuotePacket handle
+    case result of
+        Just (newQuote, pktTime) -> outputOrdered handle pktTime (S.insert newQuote S.empty)
+        Nothing -> return ()
