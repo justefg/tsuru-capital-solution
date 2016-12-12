@@ -31,6 +31,8 @@ data QuotePacket = Packet { time      :: B.ByteString
 type PktTime = Int64
 type TimedQuotePkt = (QuotePacket, PktTime)
 
+maxDelayMicroSeconds = 3000000
+
 parseOffer :: A.Parser Offer
 parseOffer = Offer <$> price <*> qty
     where price = dropZeroes <$> A.take 5
@@ -38,7 +40,7 @@ parseOffer = Offer <$> price <*> qty
           dropZeroes s = let res = B.dropWhile (== 48) s in if B.null res then "0" else res
 
 toRow :: QuotePacket -> B.ByteString
-toRow Packet {..} = B.intercalate (BC.singleton ' ') $ [time, issueCode] ++ bidStrs ++ askStrs
+toRow Packet {..} = BC.unwords $ [time, issueCode] ++ bidStrs ++ askStrs
     where bidStrs = map offerStr $ reverse bids
           askStrs = map offerStr asks
           offerStr (Offer p q) = B.concat [q, "@", p]
@@ -71,8 +73,7 @@ outputUnordered :: PcapHandle -> IO ()
 outputUnordered handle = do
     newQuote <- getQuotePacket handle
     case newQuote of
-        Just (newQuote, pktTime) -> do
-            putStr $ show pktTime ++ " "
+        Just (newQuote, _) -> do
             BC.putStrLn $ toRow newQuote
             outputUnordered handle
         Nothing -> return ()
@@ -82,20 +83,29 @@ outputOrdered handle prevPktTime pendingQuotes = do
     newQuote <- getQuotePacket handle
     case newQuote of
         Just (newQuote, pktTime) -> do
-            if pktTime - prevPktTime >= 3000000
+            if pktTime - prevPktTime >= maxDelayMicroSeconds
                 then do
+                    {- We can safely print our packets now,
+                    because there won't be any "better"
+                    (with a lower quote accept time) packet -}
                     mapM_ (BC.putStrLn . toRow) $ S.toAscList pendingQuotes
                     outputOrdered handle pktTime S.empty
                 else
+                    -- carry on accumulating packets
                     outputOrdered handle pktTime (S.insert newQuote pendingQuotes)
         Nothing ->
+            -- End of the input
             mapM_ (BC.putStrLn . toRow) $ S.toAscList pendingQuotes
 
 main = do
     args <- getArgs
     let path = fromMaybe (error "Provide the path of a dump-file") $ find (/= "-r") args
     handle <- openOffline path
-    result <- getQuotePacket handle
-    case result of
-        Just (newQuote, pktTime) -> outputOrdered handle pktTime (S.insert newQuote S.empty)
-        Nothing -> return ()
+
+    if "-r" `elem` args
+        then do
+            result <- getQuotePacket handle
+            case result of
+                Just (newQuote, pktTime) -> outputOrdered handle pktTime (S.insert newQuote S.empty)
+                Nothing -> return ()
+        else outputUnordered handle
